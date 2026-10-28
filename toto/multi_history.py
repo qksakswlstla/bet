@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime,timezone
 import numpy as np
 from .multisport import validate,analyzable,fixture,group,settle_outcome,outcomes,simulate
-from .validation import timestamp
+from .validation import timestamp,kst
 
 
 def load(path):
@@ -29,19 +29,53 @@ def save(path,row,now=None):
 
 def record_result(path,pid,result,source,confirmed,now=None):
     now=now or datetime.now(timezone.utc)
-    item=next(x for x in load(path) if x['id']==pid)
+    item=next((x for x in load(path) if x['id']==pid),None)
+    if item is None:raise ValueError('예측 ID를 찾을 수 없습니다.')
     if item['result'] or not source.strip() or not confirmed or now<timestamp(item['row']['kickoff']):raise ValueError('공식 종료 확인·출처·시각 필요. 결과 덮어쓰기 불가')
     outcome=settle_outcome(item['row'],result)
     item['result']={'official':result,'settlement_outcome':outcome,'source':source,'recorded_at':now.isoformat()}
     with sqlite3.connect(path) as db:db.execute('UPDATE records SET payload=? WHERE id=?',(json.dumps(item,ensure_ascii=False),pid))
 
 
-def evaluate(records):
-    buckets={}
+def audited_records(records,now=None):
+    now=now or datetime.now(timezone.utc)
+    accepted=[];excluded=[];seen=set()
     for x in records:
+        try:
+            row=x['row'];created=timestamp(x['created_at']);result=x.get('result')
+            if not result: raise ValueError('공식 종료 결과 미확보')
+            if validate([row],created)[0]['errors'] or not analyzable(row,validate([row],created)[0]):
+                raise ValueError('입력·근거 검수 실패')
+            if not timestamp(row['as_of'])<=timestamp(row['collected_at'])<=created<timestamp(row['deadline'])<=timestamp(row['kickoff']):
+                raise ValueError('예측 시각 누수')
+            for k in ['minute','home_score','away_score']:
+                if float(row['params'].get(k,0))!=0: raise ValueError('경기 중 상황이 사전 기록에 포함됨')
+            if not timestamp(row['kickoff'])<=timestamp(result['recorded_at'])<=now or not result.get('source'):
+                raise ValueError('종료 결과 시각·출처 오류')
+            prediction=x['prediction'];keys=outcomes(row)
+            if not prediction.get('version') or set(prediction['probabilities'])!=set(keys):raise ValueError('모형 버전·선택지 오류')
+            vals=np.array([prediction['probabilities'][k] for k in keys],float)
+            if not np.isfinite(vals).all() or (vals<0).any() or (vals>1).any() or abs(vals.sum()-1)>1e-9:
+                raise ValueError('확률 범위·합계 오류')
+            if prediction['params']!={k:float(v) for k,v in row['params'].items()}:
+                raise ValueError('기록 입력과 계산 입력 불일치')
+            if prediction['market']!=row['market'] or str(prediction.get('line',''))!=str(row.get('line','')) or tuple(prediction['scope'])!=tuple(row[k] for k in ['competition','season','division']):
+                raise ValueError('예측 상품·대회 불일치')
+            if settle_outcome(row,result['official'])!=result['settlement_outcome']:
+                raise ValueError('공식 결과와 정산 결과 불일치')
+            identity=(*group(row),*fixture(row),row['kind'])
+            if identity in seen:raise ValueError('중복 평가 표본')
+            seen.add(identity);accepted.append(x)
+        except (KeyError,ValueError,TypeError,OverflowError) as exc:
+            excluded.append({'id':x.get('id','미확인'),'사유':str(exc)})
+    return accepted,excluded
+
+
+def evaluate(records,now=None):
+    buckets={}
+    accepted,_=audited_records(records,now)
+    for x in accepted:
         row=x['row']
-        if not x['result']:continue
-        if not timestamp(row['as_of'])<=timestamp(row['collected_at'])<=timestamp(x['created_at'])<timestamp(row['deadline'])<=timestamp(row['kickoff']):continue
         key=(*group(row),row['kind'],x['prediction']['version'])
         buckets.setdefault(key,[]).append(x)
     out={}
@@ -63,6 +97,9 @@ def evaluate(records):
             for i in range(5):
                 mask=(p>=i/5)&(p<((i+1)/5) if i<4 else p<=1)
                 bins.append({'구간':f'{i*20}~{(i+1)*20}%','건수':int(mask.sum()),'평균 예측':float(p[mask].mean()) if mask.any() else None,'실제 비율':float(y[mask].mean()) if mask.any() else None})
-            return {'n':len(xs),'period':[xs[0]['row']['kickoff'],xs[-1]['row']['kickoff']],'model':score(p),'market':score(np.array(markets)),'uniform':score(np.full_like(p,1/p.shape[1])),'calibration':bins,'settled_n':len(profits),'roi':sum(profits)/(1000*len(profits)) if profits else None,'max_drawdown':float((np.maximum.accumulate(equity)-equity).max())}
-        n=len(items);out[' / '.join(map(str,key))]={'전체':metrics(items),'학습 참고 60% (학습 없음)':metrics(items[:int(n*.6)]),'검증 20%':metrics(items[int(n*.6):int(n*.8)]),'별도 평가 20%':metrics(items[int(n*.8):])}
+            return {'n':len(xs),'period':[kst(xs[0]['row']['kickoff']),kst(xs[-1]['row']['kickoff'])],'model':score(p),'market':score(np.array(markets)),'uniform':score(np.full_like(p,1/p.shape[1])),'calibration':bins,'settled_n':len(profits),'roi':sum(profits)/(1000*len(profits)) if profits else None,'max_drawdown':float((np.maximum.accumulate(equity)-equity).max()) if profits else None}
+        # 같은 시작 시각의 경기는 분할 경계를 넘기지 않음. 학습 실행은 아님.
+        times=sorted({timestamp(x['row']['kickoff']) for x in items})
+        n=len(times);first=set(times[:int(n*.6)]);second=set(times[int(n*.6):int(n*.8)])
+        out[' / '.join(map(str,key))]={'전체':metrics(items),'학습 참고 60% (학습 없음)':metrics([x for x in items if timestamp(x['row']['kickoff']) in first]),'검증 20%':metrics([x for x in items if timestamp(x['row']['kickoff']) in second]),'별도 평가 20%':metrics([x for x in items if timestamp(x['row']['kickoff']) not in first|second])}
     return out

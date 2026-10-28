@@ -30,11 +30,13 @@ def compare(legs, size=2, budget=10000):
         if len({g['match_id'] for g in group}) != size:
             continue
         for g in group:
-            if not 0 <= g['probability'] <= 1 or not 0 <= g['low'] <= g['probability'] <= g['high'] <= 1 or not math.isfinite(g['odds']) or g['odds'] <= 1:
+            has_range = 'low' in g or 'high' in g
+            if not 0 <= g['probability'] <= 1 or (has_range and not 0 <= g.get('low',-1) <= g['probability'] <= g.get('high',-1) <= 1) or not math.isfinite(g['odds']) or g['odds'] <= 1:
                 raise ValueError('조합 확률·배당 범위 오류')
         odds = math.prod(g['odds'] for g in group)
         p = math.prod(g['probability'] for g in group)
-        low = math.prod(g['low'] for g in group)
-        high = math.prod(g['high'] for g in group)
-        output.append({'selections': ' + '.join(g['label'] for g in group), 'match_ids': [g['match_id'] for g in group], 'odds': odds, 'probability': p, 'sensitivity_low': low, 'sensitivity_high': high, 'expected_profit': budget*(p*odds-1), 'low_expected_profit': budget*(low*odds-1), 'high_expected_profit': budget*(high*odds-1)})
+        known_range = all('low' in g and 'high' in g for g in group)
+        low = math.prod(g['low'] for g in group) if known_range else None
+        high = math.prod(g['high'] for g in group) if known_range else None
+        output.append({'selections': ' + '.join(g['label'] for g in group), 'match_ids': [g['match_id'] for g in group], 'odds': odds, 'probability': p, 'sensitivity_low': low, 'sensitivity_high': high, 'expected_profit': budget*(p*odds-1), 'low_expected_profit': budget*(low*odds-1) if low is not None else None, 'high_expected_profit': budget*(high*odds-1) if high is not None else None})
     return output

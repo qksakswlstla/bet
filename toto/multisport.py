@@ -33,6 +33,26 @@ def outcomes(row):
     return ['home','away']
 
 
+def validate_market(row):
+    sport=COMPETITIONS.get(row.get('competition'))
+    if sport is None or row.get('market') not in MARKETS[sport]:
+        raise ValueError('지원하지 않는 대회·상품')
+    market=row['market'];raw=row.get('line','')
+    if '핸디캡' not in market and '총득점' not in market:
+        if str(raw).strip(): raise ValueError('승패 상품에 기준점 사용 불가')
+        return
+    line=float(raw)
+    if not math.isfinite(line): raise ValueError('기준점은 유한한 수여야 합니다.')
+    if market=='90분 3-way 핸디캡':
+        if not line.is_integer(): raise ValueError('정수 3-way 핸디캡만 지원')
+    elif line%1!=.5: raise ValueError('환급 상품 미지원: 반점 기준만 지원')
+
+
+def pregame(row,now=None):
+    now=now or datetime.now(timezone.utc)
+    return now<timestamp(row['deadline']) and all(float(row['params'].get(k,0))==0 for k in ['minute','home_score','away_score'])
+
+
 def number(params,key,lo,hi):
     x=float(params[key])
     if not math.isfinite(x) or not lo<=x<=hi:
@@ -41,6 +61,9 @@ def number(params,key,lo,hi):
 
 
 def check_params(sport,p):
+    if not isinstance(p,dict) or set(p)!=set(EXAMPLE_PARAMS[sport]):
+        raise ValueError('필수 모형 변수 누락 또는 지원하지 않는 변수입니다. 선수 이름/퇴장 수를 자동 계수로 처리하지 않습니다.')
+    if any(isinstance(v,bool) for v in p.values()): raise ValueError('모형 변수는 숫자여야 합니다.')
     if sport=='football':
         for k in ['home_xg','away_xg']: number(p,k,0,8)
         number(p,'minute',0,90)
@@ -108,7 +131,7 @@ def validate(rows,now=None):
                 if not isinstance(e,dict): raise ValueError('근거 형식 오류')
                 if e.get('type') not in ('official','report','assumption'): errors.append('근거 유형은 official/report/assumption 중 하나')
                 if not e.get('source'): errors.append('근거 출처 누락')
-                if timestamp(e['as_of'])>col or timestamp(e['collected_at'])>col: errors.append('개별 근거 시각이 입력 수집 시각보다 늦음')
+                if not timestamp(e['as_of'])<=timestamp(e['collected_at'])<=col: errors.append('개별 근거 기준·수집 시각 순서 오류 또는 미래 정보')
         except (KeyError,ValueError,TypeError,OverflowError):
             errors.append('필수 자료·모형 입력·시각·배당 형식 확인 필요')
         warnings.append('학습·실제 과거 성능·추천 기준 미검증. 입력 가정에 따른 실험용 결과입니다.')
@@ -124,13 +147,15 @@ def analyzable(r,report):
 
 def simulate(row,runs=5000,seed=42,params=None):
     if not isinstance(runs,int) or not 1000<=runs<=20000: raise ValueError('실행 횟수 1000~20000')
-    sport=COMPETITIONS[row['competition']]; p=dict(params or row['params']); check_params(sport,p)
+    validate_market(row)
+    sport=COMPETITIONS[row['competition']]; p=dict(row['params'] if params is None else params); check_params(sport,p)
+    p={k:float(v) for k,v in p.items()}
     rng=np.random.default_rng(seed); extras={}
     if sport=='football':
         left=(90-p['minute'])/90
         h=rng.poisson(p['home_xg']*left,runs)+p['home_score']; a=rng.poisson(p['away_xg']*left,runs)+p['away_score']
         total=h+a; margin=h-a
-        extras['score_distribution']=dict(Counter(f'{x}:{y}' for x,y in zip(h,a)).most_common(12))
+        extras['score_distribution']={k:v/runs for k,v in Counter(f'{int(x)}:{int(y)}' for x,y in zip(h,a)).most_common(12)}
     elif sport=='basketball':
         pace=np.maximum(1,rng.normal(p['pace'],p['pace_sd'],runs))
         # 전반 점수차에 따라 후반 속도를 조건부 변경; 계수는 사용자 가정.
@@ -203,6 +228,8 @@ def official_set_result(sets):
 
 
 def settle_outcome(row,result):
+    validate_market(row)
+    if not isinstance(result,dict): raise ValueError('공식 결과는 객체 형식이어야 합니다.')
     sport=COMPETITIONS[row['competition']]
     if sport=='volleyball':
         (h,a),points=official_set_result(result['sets']);total=sum(points)

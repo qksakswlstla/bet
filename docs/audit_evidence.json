@@ -1,0 +1,180 @@
+{
+  "purpose": "합성 예시의 난수 오차 관측; 실제 예측 정확도 검증 아님",
+  "seeds": [
+    11,
+    22,
+    33,
+    44,
+    55
+  ],
+  "stability": [
+    {
+      "competition": "KBL",
+      "division": "해당 없음",
+      "kind": "example",
+      "results": {
+        "1000": {
+          "home_win_values": [
+            0.618,
+            0.649,
+            0.633,
+            0.622,
+            0.62
+          ],
+          "across_seed_sd": 0.012895735729302159
+        },
+        "20000": {
+          "home_win_values": [
+            0.63975,
+            0.6349,
+            0.6495,
+            0.63985,
+            0.64555
+          ],
+          "across_seed_sd": 0.005676860928365222
+        }
+      }
+    },
+    {
+      "competition": "KOVO",
+      "division": "남자부",
+      "kind": "example",
+      "results": {
+        "1000": {
+          "home_win_values": [
+            0.706,
+            0.706,
+            0.714,
+            0.699,
+            0.674
+          ],
+          "across_seed_sd": 0.015368799562750468
+        },
+        "20000": {
+          "home_win_values": [
+            0.6991,
+            0.6939,
+            0.69745,
+            0.6979,
+            0.6911
+          ],
+          "across_seed_sd": 0.0033046179809472667
+        }
+      }
+    },
+    {
+      "competition": "KOVO",
+      "division": "여자부",
+      "kind": "example",
+      "results": {
+        "1000": {
+          "home_win_values": [
+            0.706,
+            0.706,
+            0.714,
+            0.699,
+            0.674
+          ],
+          "across_seed_sd": 0.015368799562750468
+        },
+        "20000": {
+          "home_win_values": [
+            0.6991,
+            0.6939,
+            0.69745,
+            0.6979,
+            0.6911
+          ],
+          "across_seed_sd": 0.0033046179809472667
+        }
+      }
+    },
+    {
+      "competition": "NBA",
+      "division": "해당 없음",
+      "kind": "example",
+      "results": {
+        "1000": {
+          "home_win_values": [
+            0.618,
+            0.649,
+            0.633,
+            0.622,
+            0.62
+          ],
+          "across_seed_sd": 0.012895735729302159
+        },
+        "20000": {
+          "home_win_values": [
+            0.63975,
+            0.6349,
+            0.6495,
+            0.63985,
+            0.64555
+          ],
+          "across_seed_sd": 0.005676860928365222
+        }
+      }
+    },
+    {
+      "competition": "J리그컵",
+      "division": "해당 없음",
+      "kind": "example",
+      "results": {
+        "1000": {
+          "home_win_values": [
+            0.465,
+            0.468,
+            0.451,
+            0.428,
+            0.458
+          ],
+          "across_seed_sd": 0.015953056133543832
+        },
+        "20000": {
+          "home_win_values": [
+            0.4648,
+            0.46245,
+            0.45975,
+            0.4614,
+            0.46815
+          ],
+          "across_seed_sd": 0.0032675296479144672
+        }
+      }
+    },
+    {
+      "competition": "AFC 챔피언스리그 엘리트",
+      "division": "해당 없음",
+      "kind": "example",
+      "results": {
+        "1000": {
+          "home_win_values": [
+            0.465,
+            0.468,
+            0.451,
+            0.428,
+            0.458
+          ],
+          "across_seed_sd": 0.015953056133543832
+        },
+        "20000": {
+          "home_win_values": [
+            0.4648,
+            0.46245,
+            0.45975,
+            0.4614,
+            0.46815
+          ],
+          "across_seed_sd": 0.0032675296479144672
+        }
+      }
+    }
+  ],
+  "cloud_inventory": {
+    "records": 0,
+    "accepted_results": 0,
+    "real_records": 0
+  },
+  "user_windows_database": "미접근"
+}

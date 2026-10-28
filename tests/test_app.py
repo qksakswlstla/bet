@@ -31,3 +31,17 @@ def test_real_input_csv_without_supported_model(tmp_path,monkeypatch):
     assert not at.exception
     assert not any(x.key=='detail' for x in at.selectbox)
     assert any('보류' in x.value for x in at.warning)
+
+def test_demo_times_stable_and_bad_csv_does_not_restore_old_rows(tmp_path,monkeypatch):
+    monkeypatch.setenv('BET_DATA_DIR',str(tmp_path))
+    at=AppTest.from_file(str(APP),default_timeout=60).run()
+    first=at.session_state['example_snapshot'][0]['collected_at']
+    at.sidebar.selectbox[0].set_value('NBA').run()
+    assert at.session_state['example_snapshot'][0]['collected_at']==first
+    at.sidebar.radio[0].set_value('실제/예시 자료 입력').run()
+    next(x for x in at.radio if x.label=='입력 방법').set_value('CSV 붙여넣기').run()
+    at.session_state['entered']=[{'competition':'NBA','division':'해당 없음','kind':'real'}]
+    next(x for x in at.text_area if x.label=='CSV 내용').set_value('a,a\n1,2').run()
+    assert at.session_state['entered']==[]
+    assert not at.exception
+    assert not any(x.key=='detail' for x in at.selectbox)

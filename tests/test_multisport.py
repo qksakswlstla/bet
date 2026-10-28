@@ -57,8 +57,8 @@ def test_history_groups_and_no_leakage(tmp_path):
         sport=COMPETITIONS[row['competition']]
         result={'regulation':[1,1]} if sport=='football' else {'including_overtime':[90,85]} if sport=='basketball' else {'sets':[[25,20]]*3}
         record_result(p,x['id'],result,'example source',True,now+timedelta(days=3))
-    records=load(p);m=evaluate(records)
+    records=load(p);m=evaluate(records,now+timedelta(days=3))
     assert len(m)==6 and all(v['전체']['n']==1 for v in m.values())
     records[0]['created_at']=records[0]['row']['kickoff']
-    assert len(evaluate(records))==5
+    assert len(evaluate(records,now+timedelta(days=3)))==5
     with pytest.raises(ValueError):save(p,demos()[0],now+timedelta(days=4))
