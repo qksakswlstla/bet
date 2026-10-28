@@ -104,3 +104,40 @@ def test_credentials_not_forwarded_on_redirect():
 def test_invalid_overseas_price_is_not_usable():
     event={'bookmakers':[{'title':'synthetic','last_update':datetime.now(timezone.utc).isoformat(),'markets':[{'key':'h2h','outcomes':[{'name':'home','price':'nan'}]}]}]}
     assert '배당 형식 오류' in odds_rows(event)[0]['상태']
+
+@pytest.mark.parametrize('errors,expected',[
+ ({'plan':'Free plans do not have access to season 2026-2027'},'시즌/요금제'),
+ ({'authentication':'Invalid API key'},'인증 실패'),
+ ({'requests':'Request limit reached'},'호출 한도'),
+ ({'season':'Season must be YYYY-YYYY'},'요청 조건'),
+ ({'other':'Something happened'},'원인 미확인'),
+])
+def test_error_details_and_context(monkeypatch,tmp_path,errors,expected):
+    monkeypatch.setenv('APISPORTS_KEY','test-secret')
+    result=request('basketball','/games',{'league':12,'season':'2026-2027'},sender({'errors':errors}))
+    assert result.errors==errors
+    assert expected in ' '.join(result.causes)
+    assert result.request_context=={'sport':'basketball','league':'12','season':'2026-2027'}
+    saved=save_fetch(tmp_path/'db','failure',result)
+    assert saved['errors']==errors and saved['request_context']==result.request_context
+
+
+def test_error_secret_and_private_redaction(monkeypatch):
+    monkeypatch.setenv('APISPORTS_KEY','secret+key/123')
+    monkeypatch.setenv('ODDS_API_KEY','second-secret')
+    errors={'plan':'Season 2026-2027 not available on free plan', 'details':['secret+key/123 secret%2Bkey%2F123 second-secret','Contact user@example.com 010-1234-5678 192.168.1.1','Authorization: Bearer unrelated-token'], 'headers':{'X-Api-Key':'third-secret'},'email':'private@example.org','full_name':'Private Person'}
+    result=request('basketball','/games',send=sender({'errors':errors}))
+    encoded=json.dumps(result.__dict__)
+    for secret in ['secret+key/123','secret%2Bkey%2F123','second-secret','unrelated-token','third-secret','user@example.com','010-1234-5678','192.168.1.1','Private Person']:
+        assert secret not in encoded
+    assert result.errors['plan']==errors['plan']
+
+def test_http_json_errors_are_preserved(monkeypatch):
+    import io
+    monkeypatch.setenv('APISPORTS_KEY','test-key')
+    def send(url,headers):
+        raise HTTPError(url,403,'forbidden',{},io.BytesIO(b'{"errors":{"plan":"Season not allowed on this plan"}}'))
+    result=request('basketball','/games',{'league':12,'season':'2026-2027'},send)
+    assert result.status=='forbidden'
+    assert result.errors['plan']=='Season not allowed on this plan'
+    assert '시즌/요금제' in result.causes[0]

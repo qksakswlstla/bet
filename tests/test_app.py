@@ -80,3 +80,15 @@ def test_auto_mocked_fixture_to_manual_flow(tmp_path,monkeypatch):
     assert next(x for x in at.text_input if x.label=='홈 표시 이름').value=='합성 홈'
     assert next(x for x in at.text_input if x.label=='구매 마감').value==''
     assert next(x for x in at.text_input if x.label=='홈 승 배당').value==''
+
+def test_provider_error_details_visible(tmp_path,monkeypatch):
+    from toto.providers import FetchResult
+    import toto.auto_ui as ui
+    monkeypatch.setenv('BET_DATA_DIR',str(tmp_path))
+    monkeypatch.setattr(ui,'catalog',lambda sport:FetchResult('api_error',errors={'plan':'Season not allowed'},request_context={'sport':sport,'league':'12','season':'2026-2027'},causes=['시즌/요금제 접근 제한']))
+    at=AppTest.from_file(str(APP),default_timeout=60).run()
+    at.sidebar.radio[0].set_value('자동 경기 불러오기').run()
+    next(x for x in at.button if x.label=='공급원 대회·시즌 목록 조회').click().run()
+    assert not at.exception
+    assert any('시즌/요금제' in w.value for w in at.warning)
+    assert any('Season not allowed' in str(j.value) for j in at.json)

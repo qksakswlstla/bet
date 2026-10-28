@@ -21,6 +21,10 @@ def render(st,path,competition,division):
         if not snapshot:return
         st.write('갱신 상태:',snapshot['status'],'/',snapshot['message'])
         st.caption('조회 시도 '+kst(snapshot['last_attempt_at'])+' / 마지막 성공 '+(kst(snapshot['last_success_at']) if snapshot.get('last_success_at') else '없음'))
+        if snapshot.get('request_context'):st.write('요청 종목·대회 ID·시즌',snapshot['request_context'])
+        for cause in snapshot.get('causes',[]):st.warning(cause)
+        if snapshot.get('errors'):
+            st.write('공급원 오류 항목·설명 (비밀값/개인정보 가림)');st.json(snapshot['errors'])
         if snapshot.get('quota'):st.write('응답에 표시된 잔여 호출 정보',snapshot['quota'])
         if snapshot['status'] not in ('ok','empty'):
             st.error('조회 실패입니다. 예시나 이전 자료를 최신 자료로 대체하지 않습니다.')
