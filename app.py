@@ -1,256 +1,181 @@
-import os
+import csv
+import io
 import json
+import os
 from pathlib import Path
-from collections import Counter
 from datetime import datetime, timezone
+from collections import Counter
 import streamlit as st
-from toto.demo import example_matches, example_history
-from toto.input import read_csv, csv_text
-from toto.validation import OPTIONAL_LABELS, validate, eligible, kst
-from toto.model import probabilities, implied, simulate, OUTCOMES, VERSION
-from toto.combinations import compare, settle
-from toto.history import save_prediction, load_history, save_result, evaluate
+from toto.multisport import COMPETITIONS,MARKETS,VERSIONS,EXAMPLE_PARAMS,demos,validate,analyzable,simulate,fixture,outcomes
+from toto.validation import kst,timestamp
+from toto.combinations import compare
+from toto.multi_history import load,save,record_result,evaluate
 
-ROOT = Path(__file__).resolve().parent
-DB = Path(os.environ.get('BET_DATA_DIR', str(ROOT / 'data'))) / 'history.sqlite3'
-LABELS = {'home': '홈 승', 'draw': '무승부', 'away': '원정 승'}
-st.set_page_config(page_title='축구 분석 실험실', layout='wide')
-st.title('축구 분석·시뮬레이션 실험실')
-st.warning('실험용 · 성능 검증 미완료 · 실제 베트맨 데이터/API 연결 없음 · 자동 구매 없음')
-st.caption('90분+추가시간 기준. 연장·승부차기 제외. 경기 중 실시간 연동은 작동하지 않습니다. 아래 상황 입력은 조건부 계산입니다.')
-mode = st.sidebar.radio('데이터 선택', ['예시 데이터', '내 CSV / 붙여넣기 / 직접 입력'])
-rows = []
+st.set_page_config(page_title='다섯 대회 분석 실험실',layout='wide')
+st.title('다섯 대회 분석·시뮬레이션 실험실')
+st.warning('실험용 · 실제 학습/과거 성능 미검증 · 추천할 조합 없음')
+st.caption('공식 최신 시즌·대회 방식·베트맨 제공 상품·정산 규칙은 접근 제한으로 미확인입니다. 상품 이름은 계산 범위이며 실제 판매 여부를 뜻하지 않습니다.')
+DB=Path(os.environ.get('BET_DATA_DIR',str(Path(__file__).parent/'data')))/'multi_history.sqlite3'
+labels={'home':'홈 승','draw':'무승부','away':'원정 승','over':'오버','under':'언더'}
+comp=st.sidebar.selectbox('대회',list(COMPETITIONS))
+div=st.sidebar.selectbox('KOVO 부문',['남자부','여자부']) if comp=='KOVO' else '해당 없음'
+sport=COMPETITIONS[comp]
+param_labels={'pace':'경기 전체 팀당 예상 공격 횟수','pace_sd':'공통 공격 횟수의 표준편차','home_eff':'홈 공격 1회당 기대득점','away_eff':'원정 공격 1회당 기대득점','residual_sd':'팀 득점 잔차 표준편차','close_pace':'접전 시 후반 속도 배수','blowout_pace':'큰 점수 차 시 후반 속도 배수','overtime_fraction':'연장 1회 공격 횟수 / 정규경기 공격 횟수','rally_home':'한 랠리에서 홈이 이길 확률','fatigue_per_set':'세트마다 홈 랠리 확률 변화','substitution_delta':'교체 후 홈 랠리 확률 변화','substitution_after_point':'세트 내 합계 몇 점부터 교체 효과 적용','home_xg':'홈 경기 전체 기대득점','away_xg':'원정 경기 전체 기대득점','minute':'경과 시간(사전 기록은 0)','home_score':'현재 홈 점수(사전 기록은 0)','away_score':'현재 원정 점수(사전 기록은 0)'}
+mode=st.sidebar.radio('데이터',['예시 데이터','실제/예시 자료 입력'])
 
+def encode_csv(rows):
+    buf=io.StringIO();w=csv.DictWriter(buf,fieldnames=list(demos()[0]));w.writeheader()
+    for r in rows:w.writerow({k:json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list,bool)) else v for k,v in r.items() if k in w.fieldnames})
+    return buf.getvalue().encode('utf-8-sig')
 
-st.sidebar.download_button('예시 CSV 내려받기', csv_text(example_matches()).encode('utf-8-sig'), 'example_matches.csv', 'text/csv')
-st.sidebar.download_button('빈 입력 양식 내려받기', csv_text([]).encode('utf-8-sig'), 'matches_template.csv', 'text/csv')
-if mode == '예시 데이터':
-    rows = example_matches()
-    st.error('예시 데이터 — 팀·경기·배당·기대득점·과거 결과는 모두 가상입니다.')
-else:
-    with st.expander('데이터 입력', expanded=True):
-        method = st.radio('입력 방법', ['CSV 업로드', 'CSV 붙여넣기', '한 경기 직접 입력'], horizontal=True)
-        text = ''
-        if method == 'CSV 업로드':
-            uploaded = st.file_uploader('UTF-8 CSV 파일 (최대 100경기, 2MB)', type=['csv'])
-            if uploaded:
+st.sidebar.download_button('다섯 대회 예시 CSV',encode_csv(demos()),'multi_example.csv')
+st.sidebar.download_button('빈 CSV 양식',encode_csv([]),'multi_template.csv')
+rows=demos() if mode=='예시 데이터' else st.session_state.get('entered',[])
+if mode!='예시 데이터':
+    method=st.radio('입력 방법',['한 경기 직접 입력','CSV 업로드','CSV 붙여넣기'])
+    if method=='한 경기 직접 입력':
+        st.caption('팀 ID는 대회·시즌·남녀부 범위에서 같은 팀에 같은 값을 사용합니다. 공급원 이름이 달라도 동일 ID를 직접 지정하세요. 아래 숫자는 실제 자료에서 확인한 가정만 입력하세요.')
+        with st.form('input'):
+            r={'competition':comp,'division':div}
+            for k,label in [('season','시즌 (공식 자료 확인 후 기입)'),('stage','대회 단계'),('match_id','경기 ID'),('home_id','홈 팀 ID'),('away_id','원정 팀 ID'),('home','홈 표시 이름'),('away','원정 표시 이름'),('provider','공급원 이름'),('kickoff','시작 시각'),('deadline','구매 마감'),('source','자료 출처'),('collected_at','수집 시각'),('as_of','정보 기준 시각'),('rules_version','정산 규칙 버전/식별자'),('rules_source','공식 규칙·베트맨 상품 근거 URL/자료명'),('basis','모형 입력 근거·표본 수·누락 항목')]:
+                r[k]=st.text_input(label,help='시간은 2026-11-01T19:00:00+09:00 형식' if k in ['kickoff','deadline','collected_at','as_of'] else None)
+            r['kind']=st.selectbox('실제/예시',['real','example'],format_func=lambda x:'실제 입력' if x=='real' else '예시 데이터')
+            r['market']=st.selectbox('상품 계산 기준',MARKETS[sport]);r['line']=st.text_input('기준점 (승패는 빈칸, 홈 핸디캡은 부호 포함)')
+            st.caption('선택한 상품의 배당만 채우세요. 승무패는 홈·무·원정, 승패는 홈·원정, 총득점은 오버·언더입니다.')
+            odds_fields={k:st.text_input(labels[k]+' 배당') for k in labels}
+            st.caption('모형 입력: 근거가 없으면 비워두세요. 필수 수치가 비어 있으면 입력은 보관하되 계산은 보류합니다.')
+            param_fields={k:st.text_input(param_labels[k]) for k in EXAMPLE_PARAMS[sport]}
+            evidence_text=st.text_area('근거 목록 JSON (미확보면 [])',value='[]',help='[{"type":"official 또는 report 또는 assumption","source":"출처","as_of":"시간대 포함 시각","collected_at":"시간대 포함 시각","note":"내용"}]')
+            r['rules_verified']=st.checkbox('해당 시즌·단계의 경기 방식과 선택한 상품 정산 범위를 공식 자료로 확인했습니다')
+            r['model_inputs_supported']=st.checkbox('수치 입력의 근거와 누락 항목을 기록했습니다 (학습 검증 완료를 의미하지 않음)')
+            r['combination_verified']=st.checkbox('해당 상품의 실제 조합 가능 여부를 확인했습니다')
+            r['odds_available_verified']=st.checkbox('입력 배당이 당시 실제 구매 가능했음을 확인했습니다')
+            if st.form_submit_button('입력 목록에 추가'):
                 try:
-                    text = uploaded.getvalue().decode('utf-8-sig')
-                except UnicodeDecodeError:
-                    st.error('UTF-8 CSV로 저장한 후 다시 올려주세요.')
-        elif method == 'CSV 붙여넣기':
-            text = st.text_area('열 이름을 포함한 CSV 내용', height=180)
-        else:
-            st.caption('모든 시각에 +09:00 등 시간대를 포함하세요. 정보별 시각이 다르면 가장 보수적인 공통 시각을 사용하고 근거에 개별 출처·시각을 적으세요.')
-            with st.form('manual'):
-                data = {'sport': 'football'}
-                descriptions = {'match_id':'경기 식별자', 'league':'리그', 'home':'홈팀', 'away':'원정팀', 'kickoff':'시작 시각', 'deadline':'구매 마감', 'source':'출처 (URL·자료명)', 'collected_at':'수집 시각', 'as_of':'경기 정보 기준 시각', 'home_odds':'홈 승 배당', 'draw_odds':'무 배당', 'away_odds':'원정 승 배당', 'home_xg':'홈 기대득점 (사용자 가정)', 'away_xg':'원정 기대득점 (사용자 가정)', 'xg_basis':'기대득점 근거·가정·개별 출처와 시각'}
-                for key, label in descriptions.items():
-                    data[key] = st.text_input(label)
-                data['kind'] = st.selectbox('실제/예시 구분', ['real', 'example'], format_func=lambda x: '실제 입력' if x == 'real' else '예시 데이터')
-                data['product'] = '1X2_90'
-                data['lineup_status'] = st.selectbox('라인업 상태', ['unknown', 'expected', 'confirmed'], format_func=lambda x: {'unknown': '미확보', 'expected': '예상 (미확정)', 'confirmed': '공식 확정'}[x])
-                if st.form_submit_button('입력 검수하기'):
-                    st.session_state.manual = data
-            rows = [st.session_state.manual] if 'manual' in st.session_state else []
+                    r.update(odds={k:float(odds_fields[k]) for k in outcomes(r)},params={k:float(v) for k,v in param_fields.items() if v.strip()},evidence=json.loads(evidence_text))
+                    errors=validate([r])[0]['errors']
+                    if errors:st.error(' / '.join(errors))
+                    else:
+                        st.session_state.entered=[*st.session_state.get('entered',[]),r];rows=st.session_state.entered;st.success('입력 완료')
+                except (ValueError,TypeError):st.error('필수 배당·수치·근거 JSON을 확인하세요. 숫자에는 쉼표를 넣지 마세요.')
+        st.caption('이 버전에서 수치 입력이 어려우면 예시 데이터로 구조를 확인하세요. 입력을 추측해서 채우지 마세요. 자동 데이터 수집은 연결되지 않았습니다.')
+    else:
+        text=''
+        if method=='CSV 업로드':
+            f=st.file_uploader('UTF-8 CSV (최대 2MB/100행)',type=['csv'])
+            if f:
+                try:text=f.getvalue().decode('utf-8-sig')
+                except UnicodeDecodeError:st.error('UTF-8 파일이 필요합니다.')
+        else:text=st.text_area('CSV 내용')
         if text:
             try:
-                rows = read_csv(text)
-            except ValueError as e:
-                st.error(str(e))
-    st.info('실제 데이터는 사용자가 입력한 자료이며 공급원과의 자동 대조는 없습니다. 스크린샷 인식은 지원하지 않습니다.')
+                if len(text.encode())>2_000_000:raise ValueError('2MB 초과')
+                reader=csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
+                if not reader.fieldnames or len(reader.fieldnames)!=len(set(reader.fieldnames)):raise ValueError('열 중복/누락')
+                parsed=[]
+                for r in reader:
+                    if len(parsed)>=100 or None in r or any(v is None for v in r.values()):raise ValueError('행 수/열 수 오류')
+                    for k in ['params','odds','evidence','rules_verified','model_inputs_supported','combination_verified','odds_available_verified','source_conflict']:
+                        if k in r:r[k]=json.loads(r[k])
+                    parsed.append(r)
+                rows=parsed;st.session_state.entered=rows
+            except (ValueError,TypeError) as e:st.error(f'CSV 오류: {e}');rows=[]
+    st.download_button('입력 목록 백업 CSV',encode_csv(rows),'my_matches.csv')
+reports=validate(rows)
+visible=[i for i,r in enumerate(rows) if r.get('competition')==comp and r.get('division')==div]
+tabs=st.tabs(['1 경기 목록','2 경기 상세','3 시나리오 비교','4 조합 비교','5 검수 결과','6 성능 기록'])
 
-reports = validate(rows)
-tabs = st.tabs(['1 경기 목록', '2 경기 상세', '3 시나리오 비교', '4 조합 비교', '5 검수 결과', '6 성능 기록'])
-valid_indices = [i for i, r in enumerate(reports) if not r['errors']]
+@st.cache_data(show_spinner=False)
+def calculate(row,params=None,runs=5000,seed=42):return simulate(row,runs,seed,params)
 
-
-def choose(prefix):
-    if not valid_indices:
-        st.info('검수를 통과한 경기를 먼저 입력하세요.')
-        return None
-    i = st.selectbox('경기 선택', valid_indices, format_func=lambda j: f"{'[예시 데이터]' if rows[j]['kind']=='example' else '[실제 입력]'} {rows[j]['home']} – {rows[j]['away']}", key=prefix)
-    return i
-
+def choose(key):
+    ids=[i for i in visible if analyzable(rows[i],reports[i])]
+    if not ids:st.info('계산 가능한 자료 없음: 필수값·규칙·입력 근거를 확인하세요.');return None
+    return st.selectbox('경기',ids,format_func=lambda i:f"{'[예시 데이터]' if rows[i]['kind']=='example' else '[실제 입력/실험용]'} {rows[i]['home']}–{rows[i]['away']} / {rows[i]['market']}",key=key)
 
 with tabs[0]:
-    st.subheader('경기 목록')
-    listing = []
-    for row, report in zip(rows, reports):
-        def show_time(key):
-            try:
-                return kst(row.get(key, ''))
-            except ValueError:
-                return '잘못된 시각'
-        listing.append({'구분': '예시 데이터' if row.get('kind')=='example' else '사용자 입력 (실제 여부 검수 필요)', '경기': f"{row.get('home','')} – {row.get('away','')}", '시작(KST)': show_time('kickoff'), '마감(KST)': show_time('deadline'), '수집(KST)': show_time('collected_at'), '정보 기준(KST)': show_time('as_of'), '사전 분석': '가능 (실험용)' if eligible(row, report) else '보류 / 마감', '정보 입력 항목': f"{report['available_fields']}/{report['total_fields']}", '출처': row.get('source')})
-    st.dataframe(listing, hide_index=True)
-    st.caption('정보 입력 항목 수는 누락 현황이며 정확도·신뢰도 점수가 아닙니다. 입력값은 자동 갱신되지 않습니다.')
-
+    st.subheader(f'{comp} {div}')
+    st.dataframe([{'대회':c,'부문':d,'예시 데이터': '가능','실제 자료 수동 입력':'가능','기본 모형':'조건부 구현 (학습 없음)','과거 성능 검증':'미완료','추천 기준':'미충족'} for c in COMPETITIONS for d in (['남자부','여자부'] if c=='KOVO' else ['해당 없음'])],hide_index=True)
+    for i in visible:
+        r=rows[i];st.write(f"{'예시 데이터' if r.get('kind')=='example' else '실제 입력'} · {r.get('season')} · {r.get('stage')} · {r.get('home')} – {r.get('away')}")
+        try:st.caption(f"시작 {kst(r['kickoff'])} / 마감 {kst(r['deadline'])} / 수집 {kst(r['collected_at'])} / 기준 {kst(r['as_of'])}")
+        except (ValueError,KeyError):st.error('시간 형식 오류')
 with tabs[4]:
-    st.subheader('검수 결과 · 추천보다 먼저 확인하세요')
-    for row, report in zip(rows, reports):
-        st.write(f"{report['match_id']} · {row.get('home','')} – {row.get('away','')}")
-        for error in report['errors']:
-            st.error(error)
-        for warning in report['warnings']:
-            st.warning(warning)
-    st.info('추천 보류: 모형의 별도 기간 성능·확률 보정·실제 조합 가능 여부·정산 규칙이 검증되지 않았습니다. 입력 항목이 많아도 추천을 활성화하지 않습니다.')
-
+    for i,r in enumerate(rows):
+        st.write(f"{r.get('competition')} / {r.get('match_id')}")
+        for e in reports[i]['errors']:st.error(e)
+        for w in reports[i]['warnings']:st.warning(w)
+    st.info('효율·선수·이동·날씨 등은 확보된 근거만 기록합니다. 자동 영향 계수·공식 뉴스 확인은 없습니다. 근거 유형 official=공식 발표, report=보도, assumption=분석자 가정.')
 with tabs[1]:
-    i = choose('detail')
+    i=choose('detail')
     if i is not None:
-        row, report = rows[i], reports[i]
-        st.subheader('예시 데이터' if row['kind']=='example' else '사용자 입력 실제 자료 · 실험용')
-        p = probabilities(float(row['home_xg']), float(row['away_xg']))
-        market = implied([float(row[k]) for k in ('home_odds','draw_odds','away_odds')])
-        st.dataframe([{'결과': LABELS[k], '모형 확률': f'{p[k]:.2%}', '배당 암시 확률(1/배당)': f"{market['raw'][j]:.2%}", '마진 조정 확률': f"{market['adjusted'][j]:.2%}", '차이(%p)': round((p[k]-market['adjusted'][j])*100, 2)} for j,k in enumerate(OUTCOMES)], hide_index=True)
-        st.write(f"배당 마진: {market['margin']:.2%}. 역배당의 합으로 나누는 비례 정규화 방식이며 실제 확률을 보장하지 않습니다.")
-        st.write(f"예상 득점 (입력 가정): 홈 {row['home_xg']}, 원정 {row['away_xg']}")
-        st.dataframe([{'스코어': x['score'], '확률': f"{x['probability']:.2%}"} for x in p['scores']], hide_index=True)
-        st.write('근거:', row['xg_basis'], ' / 출처:', row['source'])
-        st.write('반영하지 못한 정보:', ', '.join(OPTIONAL_LABELS[k] for k in report['missing']) or '누락 항목 없음 (메모의 자동 영향 추정은 미지원)')
-        st.caption('독립 포아송 모형: 두 팀 득점이 독립이고 경기 내 득점률이 일정하다고 가정합니다. 전술·저득점 상관·선수 효과를 학습하지 않았습니다.')
-        with st.expander('단일 경기 선택지별 고정 예산 비교'):
-            single_budget = st.number_input('단일 선택 1개 비교 고정 예산 (원)', 0, 1000000, 10000, step=1000)
-            h, a = float(row['home_xg']), float(row['away_xg'])
-            variants = [probabilities(h*hf, a*af) for hf in (.8, 1., 1.2) for af in (.8, 1., 1.2) if h*hf<=8 and a*af<=8]
-            st.dataframe([{'선택': LABELS[k], '적용 배당': float(row[k+'_odds']), '추정 확률': f'{p[k]:.2%}', '민감도 범위': f"{min(x[k] for x in variants):.2%}~{max(x[k] for x in variants):.2%}", '기대순손익(원)': round(single_budget*(p[k]*float(row[k+'_odds'])-1))} for k in OUTCOMES], hide_index=True)
-            st.caption('각 선택을 개별 대안으로 비교합니다. 전부 구매하는 계획은 아닙니다. 기대순손익=예산×(확률×배당−1), 적중 배당 반환·미적중 0 가정. 민감도는 각 기대득점 ±20% 가정(0~8 범위 내)의 범위이며 통계적 신뢰구간이 아닙니다. 실제 단일 구매 가능 여부·규칙은 미확인, 추천 보류입니다.')
-        with st.expander('가상 상품 확률 계산 — 실제 구매 상품 연결 없음'):
-            handicap = st.selectbox('홈 기준 정수 유럽식 3-way 핸디캡', [-2,-1,0,1,2], index=2)
-            total = st.selectbox('언더오버 기준 (반골만 지원)', [.5,1.5,2.5,3.5,4.5], index=2)
-            pp = probabilities(float(row['home_xg']), float(row['away_xg']), handicap, total)
-            st.write({LABELS[k]: f'{v:.2%}' for k,v in pp['handicap'].items()})
-            st.write({'오버': f"{pp['total']['over']:.2%}", '언더': f"{pp['total']['under']:.2%}"})
-            st.caption('핸디캡은 홈 최종 득점에 정수를 더해 승·무·패를 판정합니다. 아시안·쿼터 라인·정수 U/O·환급 상품은 입력/조합/정산 미지원.')
-        if st.button('이 시점의 사전 예측 저장', disabled=not eligible(row, report)):
-            try:
-                saved = save_prediction(DB, row)
-                st.success(f"예측 저장 완료: {saved['id']}. 입력·배당·모형 버전·생성 시각이 고정됩니다.")
-            except ValueError as e:
-                st.error(str(e))
-
+        r=rows[i];p=calculate(r);st.warning('예시 데이터' if r['kind']=='example' else '실제 입력에 따른 실험용 결과')
+        inv={k:1/float(v) for k,v in r['odds'].items()};s=sum(inv.values())
+        st.dataframe([{'결과':labels[k],'확률':v,'마진 조정 배당 확률':inv[k]/s,'차이(%p)':100*(v-inv[k]/s)} for k,v in p['probabilities'].items()],hide_index=True)
+        single_budget=st.number_input('단일 선택 대안 1개당 고정 예산',0,1000000,10000)
+        st.dataframe([{'선택':labels[k],'배당':r['odds'][k],'기대순손익':single_budget*(v*float(r['odds'][k])-1)} for k,v in p['probabilities'].items()])
+        st.caption('각 선택은 개별 대안이며 전부 구매하는 계획이 아닙니다. 적중 시 배당 반환·미적중 시 0 가정, 추정 오차 크기 미확보.')
+        st.write('배당 마진:',s-1,'예상 총득점:',p['mean_total'])
+        st.write('점수/세트 차 5·50·95 분위:',p['margin_quantiles'],'총득점 5·50·95 분위:',p['total_quantiles'])
+        st.caption('분위는 가정 모형의 결과 분포이며 모형 정확도의 신뢰구간이 아닙니다. 배당 조정은 역배당을 합으로 나눕니다.')
+        for key in ['score_distribution','set_score_distribution','sample_sets']:
+            if key in p:st.write(key,p[key])
+        with st.expander('점수 차·총득점 전체 분포'):st.json({'margin':p['margin_distribution'],'total':p['total_distribution']})
+        st.write('근거:',r['basis']);st.write('출처:',r['source']);st.json(r.get('evidence',[]))
+        st.caption('자료 충실도: 근거 항목 '+str(len(r.get('evidence',[])))+'개. 정확도 점수가 아닙니다. 근거 목록에 없는 항목은 미확보/미반영입니다.')
+        if st.button('사전 예측 고정 저장'):
+            try:save(DB,r);st.success('저장 완료')
+            except ValueError as e:st.error(str(e))
 with tabs[2]:
-    i = choose('scenario')
+    i=choose('scenario')
     if i is not None:
-        row = rows[i]
-        st.subheader('예시 데이터 · 조건부 시뮬레이션' if row['kind']=='example' else '실험용 조건부 시뮬레이션')
-        scenario = st.selectbox('비교할 상황 (각각 별도 조건, 중복 합산 안 함)', ['핵심 선수 출전·결장', '라인업 변경', '이른 선제골', '이른 선제 실점', '퇴장', '체력 저하·일정 부담', '악천후·외부 조건'])
-        st.warning('시나리오 발생 확률은 확보하지 못했습니다. 아래 배수는 사용자의 민감도 가정이며 선수·퇴장·날씨의 검증된 효과가 아닙니다.')
-        hf = st.slider('홈 잔여 득점률 배수', 0., 2., 1., .05)
-        af = st.slider('원정 잔여 득점률 배수', 0., 2., 1., .05)
-        minute = st.slider('관측 또는 가정한 경과 시간 (분)', 0, 90, 0)
-        hs = st.number_input('현재/가정 홈 점수', 0, 30, 0)
-        aws = st.number_input('현재/가정 원정 점수', 0, 30, 0)
-        hr = st.number_input('홈 퇴장 수 (메모용)', 0, 5, 0)
-        ar = st.number_input('원정 퇴장 수 (메모용)', 0, 5, 0)
-        evidence = st.text_input('관측 출처·관측 시각 또는 가정 근거', value='사용자 가정')
-        st.caption('퇴장 수는 자동 계수로 변환하지 않습니다. 위 득점률 배수로 효과를 직접 가정하세요. 관측 점수·시간도 입력 내용의 진위를 자동 확인하지 않습니다.')
-        runs = st.select_slider('몬테카를로 실행 횟수', [1000,10000,20000,100000,200000], value=20000)
-        seed = st.number_input('난수 시드 (같은 입력이면 같은 결과)', 0, 2147483647, 42)
+        r=rows[i];sp=COMPETITIONS[r['competition']]
+        scenarios={'basketball':['핵심 선수 결장·시간 제한','파울 트러블','속도 변화','접전·큰 점수 차 운영'],'volleyball':['공격수·세터 결장','리시브 불안·범실','세트 도중 교체','장기전 체력'],'football':['핵심 선수 결장·로테이션','이른 득점·실점','퇴장','진출 조건 운영']}
+        scenario=st.selectbox('조건',scenarios[sp]);st.warning('발생 확률 미확보: 이 조건이 발생했을 때의 결과만 계산합니다. 겹치는 시나리오는 합산하지 않습니다.')
+        params={k:st.number_input(param_labels[k],value=float(v),key=f'scenario_{i}_{k}_{mode}') for k,v in r['params'].items()}
+        reason=st.text_input('변경 근거·관측 시각 (공식/보도/가정 구분)',value='분석자 가정')
+        runs=st.selectbox('실행 횟수',[1000,5000,20000],index=1);seed=st.number_input('난수 시드',0,2147483647,42)
         try:
-            base = probabilities(float(row['home_xg']), float(row['away_xg']))
-            result = simulate(float(row['home_xg']), float(row['away_xg']), runs, seed, minute, (hs,aws), hf,af)
-            st.dataframe([{'결과': LABELS[k], '경기 전 기준': f'{base[k]:.2%}', '조건부 정확 합산': f"{result['exact'][k]:.2%}", '차이(%p)': round(100*(result['exact'][k]-base[k]),2), '모의실험': f"{result['probabilities'][k]:.2%}", '표본오차(표준오차)': f"{result['mc_standard_error'][k]:.3%}"} for k in OUTCOMES], hide_index=True)
-            result.update(scenario=scenario, evidence=evidence, red_cards={'home':hr,'away':ar}, occurrence_probability=None, data_kind=row['kind'], source=row['source'], match_id=row['match_id'], collected_at=row['collected_at'], as_of=row['as_of'], calculated_at=datetime.now(timezone.utc).isoformat())
-            st.download_button('재현용 입력·결과 JSON 저장', json.dumps(result,ensure_ascii=False,indent=2), 'scenario.json', 'application/json')
-        except ValueError as e:
-            st.error(str(e))
-        st.caption('표본오차는 난수 추출 오차이며 모형의 예측 오차가 아닙니다. 횟수를 늘려도 모형 정확도가 검증되지는 않습니다. 90분 기준 단순 잔여시간 비례이며 추가시간은 별도 추정하지 않습니다.')
-
+            changed=calculate(r,params,runs,seed);base=calculate(r,None,runs,seed)
+            st.dataframe([{'결과':labels[k],'변경 전':base['probabilities'][k],'변경 후':v,'차이(%p)':100*(v-base['probabilities'][k])} for k,v in changed['probabilities'].items()])
+            changed.update(scenario=scenario,basis=reason,record=r,calculated_at=datetime.now(timezone.utc).isoformat(),occurrence_probability=None)
+            st.download_button('재현용 JSON',json.dumps(changed,ensure_ascii=False,indent=2),'scenario.json')
+        except (ValueError,KeyError,TypeError):st.error('변경 입력의 필수값·범위를 확인하세요.')
+        st.caption('실행 횟수 증가는 모형 정확도 검증이 아닙니다. 농구·배구 실시간 모형은 없으며 경기 전 조건만 비교합니다. 축구는 minute/home_score/away_score를 직접 입력하는 단순 잔여시간 모형입니다. 진출 확률·승부차기 모형은 미구현입니다.')
 with tabs[3]:
-    st.subheader('조합 비교 · 실험용')
-    st.error('추천할 조합 없음 — 성능과 실제 상품 규칙이 검증되지 않았습니다.')
-    st.caption('단일 경기 확률은 상세 화면에서 확인하세요. 아래는 정규시간 승무패만 비교하며 실제 조합 가능 여부·상한·세금·취소 규칙은 연결하지 않았습니다.')
-    fixed_budget = st.number_input('조합 1개 비교에 사용할 고정 예산 (원)', 0, 1000000, 10000, step=1000)
-    size = st.radio('경기 수', [2,3], horizontal=True)
-    data_kind = st.radio('조합 데이터 구분 (실제/예시 혼합 금지)', ['example','real'], format_func=lambda x: '예시 데이터' if x=='example' else '실제 입력', horizontal=True)
+    st.error('추천할 조합 없음 · 대회 혼합 비교는 실험용')
+    kind=st.radio('비교 자료',['example','real'],format_func=lambda x:'예시 데이터' if x=='example' else '실제 입력')
+    budget=st.number_input('대안 1개당 고정 예산',0,1000000,10000);size=st.radio('경기 수',[2,3],horizontal=True)
     legs=[]
-    for i in valid_indices:
-        row = rows[i]
-        if row['kind'] != data_kind or not eligible(row,reports[i]):
-            continue
-        pick = st.selectbox(f"{row['home']} – {row['away']}", ['skip',*OUTCOMES], format_func=lambda x: '제외' if x=='skip' else LABELS[x], key=f'leg{i}')
-        if pick == 'skip':
-            continue
-        h,a=float(row['home_xg']),float(row['away_xg'])
-        p=probabilities(h,a)[pick]
-        sensitivity=[probabilities(h*hf,a*af)[pick] for hf in (.8,1.,1.2) for af in (.8,1.,1.2) if h*hf<=8 and a*af<=8]
-        legs.append({'match_id':row['match_id'],'label':f"{row['home']}–{row['away']} {LABELS[pick]}", 'probability':p,'low':min(sensitivity),'high':max(sensitivity),'odds':float(row[pick+'_odds'])})
-    if len(legs)>10:
-        st.warning('선택이 10경기를 초과했습니다. 10경기 이하로 줄여주세요.')
-        output=[]
-    else:
-        output=compare(legs,size,fixed_budget)
-    st.info('독립 가정으로 경기 확률을 곱합니다. 상관관계는 확보하지 못했으며 실제 결합 확률과 다를 수 있습니다. 범위는 두 팀 기대득점을 각각 ±20% 바꾼 9개 가정의 범위로, 통계적 신뢰구간이 아닙니다.')
-    if output:
-        counts=Counter(mid for x in output for mid in x['match_ids'])
-        st.dataframe([{'선택':x['selections'],'총 배당':round(x['odds'],3),'적중 확률':f"{x['probability']:.2%}",'가정 민감도 범위':f"{x['sensitivity_low']:.2%}~{x['sensitivity_high']:.2%}",'기대순손익(원)':round(x['expected_profit']),'민감도 하한 손익':round(x['low_expected_profit']),'민감도 상한 손익':round(x['high_expected_profit'])} for x in output],hide_index=True)
-        st.write('경기별 반복 횟수:',dict(counts))
-        st.caption('각 행은 동일 예산으로 대안을 개별 비교한 것이며 모두 구매하는 계획이 아닙니다. 기대순손익 = 예산 × (확률 × 배당 − 1). 전부 적중 시 배당곱, 하나라도 미적중 시 0원 반환 가정. 민감도 하한이 양수여도 추천하지 않습니다.')
-    else:
-        st.info(f'{size}경기 이상에서 선택지를 골라 비교하세요. 오류·마감 경기는 제외됩니다.')
-    with st.expander('가정 정산 계산기 — 실제 정산 규칙 연결 없음'):
-        statuses=[]
-        for j in range(3):
-            status=st.selectbox(f'{j+1}번 선택 상태',['제외','적중','미적중','취소/적특'],key=f'status{j}')
-            odd=st.number_input(f'{j+1}번 당시 배당',1.01,1000.,2.,key=f'odd{j}')
-            if status!='제외':
-                statuses.append({'odds':odd,'status':{'적중':'win','미적중':'loss','취소/적특':'void'}[status]})
-        if statuses:
-            settled=settle(statuses,float(fixed_budget))
-            st.write(f"반환액 {settled['return']:,.0f}원 / 순손익 {settled['profit']:,.0f}원")
-            st.caption('단순 가정: 취소/적특 배당 1, 전부 취소면 원금 반환. 실제 상품의 취소·연기 규칙은 직접 확인해야 합니다. 자동 구매·증액 기능은 없습니다.')
-
+    for i,r in enumerate(rows):
+        if r.get('kind')!=kind or not analyzable(r,reports[i]) or timestamp(r['deadline'])<=datetime.now(timezone.utc):continue
+        if kind=='real' and (not r.get('combination_verified') or not r.get('odds_available_verified')):continue
+        pick=st.selectbox(f"{r['competition']} {r['division']} {r['home']}–{r['away']} {r['market']}",['skip',*outcomes(r)],format_func=lambda x:'제외' if x=='skip' else labels[x],key=f'leg{i}')
+        if pick=='skip':continue
+        p=calculate(r)['probabilities'][pick]
+        legs.append({'match_id':json.dumps(fixture(r),ensure_ascii=False),'label':f"{r['competition']} {r['home']} {labels[pick]}",'probability':p,'low':0.,'high':1.,'odds':float(r['odds'][pick])})
+    if len(legs)<=10:
+        combos=compare(legs,size,float(budget))
+        st.dataframe([{'선택':x['selections'],'배당':x['odds'],'독립 가정 확률':x['probability'],'기대순손익':x['expected_profit']} for x in combos])
+        st.write('비교 대안에서 경기 반복 횟수',dict(Counter(mid for x in combos for mid in x['match_ids'])))
+    else:st.warning('최대 10개 선택만 비교합니다.')
+    st.caption('같은 경기의 다른 상품 선택은 한 조합에 넣지 않습니다. 경기 간 독립 가정으로 곱하며 상관·공통 모형 오류·추정 오차의 크기는 미확보입니다. 기대손익=예산×(확률×배당−1), 모두 적중 시 배당곱 반환 가정. 한 대회 성능으로 다른 대회 추천을 정당화하지 않습니다. 자동 구매·증액 없음.')
 with tabs[5]:
-    st.subheader('성능 기록 · 검증 완료 아님')
-    history=load_history(DB)
-    history_mode=st.radio('평가 자료',['내 실제 예측 기록','저장한 예시 기록','예시 데이터: 합성 과거 30경기'])
-    selected_history=example_history() if history_mode.startswith('예시 데이터:') else history
-    kind='real' if history_mode=='내 실제 예측 기록' else 'example'
-    if kind=='example':
-        st.error('예시 데이터 — 아래 지표·수익은 합성 결과이며 실제 성능 증거가 아닙니다.')
-    relevant=[x for x in selected_history if x['row']['kind']==kind]
-    st.dataframe([{'ID':x['id'],'경기':f"{x['row']['home']}–{x['row']['away']}",'시작(KST)':kst(x['row']['kickoff']),'예측 생성(KST)':kst(x['created_at']),'모형':x['model'],'결과':f"{x['result']['home']}:{x['result']['away']} ({x['result']['status']})" if x.get('result') else '미확보'} for x in relevant],hide_index=True)
-    pending=[x for x in history if not x.get('result')]
+    records=load(DB);st.write('저장된 예측',len(records))
+    st.caption('대회·시즌·남녀부·상품·기준점·규칙 버전·모형 버전·실제/예시별 독립 평가입니다. 학습/보정 학습은 수행하지 않았고, 시간순 60/20/20 보고만 구현했습니다. 과거 검증 완료 상태는 활성화하지 않습니다.')
+    pending=[x for x in records if not x['result']]
     if pending:
-        with st.expander('경기 종료 결과 기록 (덮어쓰기 불가)'):
-            with st.form('result'):
-                pid=st.selectbox('예측 ID',[x['id'] for x in pending])
-                status=st.selectbox('상태',['finished','void'],format_func=lambda x:'공식 종료' if x=='finished' else '취소/적특')
-                hg=st.number_input('최종 홈 득점 (정규시간)',0,99,0)
-                ag=st.number_input('최종 원정 득점 (정규시간)',0,99,0)
-                source=st.text_input('공식 결과 출처·확인 시각')
-                finished_confirmed=st.checkbox('공식 경기 종료 또는 취소를 직접 확인했습니다')
-                confirmed=st.checkbox('기록 배당이 당시 실제 구매 가능했고, 이 앱의 단순 정산 규칙이 해당 상품에 맞음을 직접 확인했습니다')
-                if st.form_submit_button('결과 고정 저장'):
-                    try:
-                        if not finished_confirmed:
-                            raise ValueError('공식 종료/취소를 먼저 확인하세요.')
-                        save_result(DB,pid,status,int(hg),int(ag),source,confirmed)
-                        st.success('결과 저장 완료. 다시 열면 평가에 반영됩니다.')
-                    except ValueError as e:
-                        st.error(str(e))
-    evaluation=evaluate(selected_history,kind)
-    st.write(f"평가 가능한 종료 경기 {evaluation['n']}개 / 제외 {len(evaluation['excluded'])}개")
-    st.caption('고정 포아송 모형으로 학습은 실시하지 않았습니다. 시간순 60/20/20 분리는 참고·검증·별도 평가 구간 표시용이며, 별도 구간을 보고 모형을 바꾸면 새로운 미사용 기간이 필요합니다. 모형 버전별 조정 이력이나 미사용 기간을 자동 증명하지 않으므로 검증 완료로 표시하지 않습니다.')
-    for name, metrics in [('전체',evaluation['all']),*evaluation['splits'].items()]:
-        with st.expander(name,expanded=name=='전체'):
-            if not metrics['n']:
-                st.info('표본 없음: 성능 미검증')
-                continue
-            st.write(f"표본 {metrics['n']}개 / {kst(metrics['period'][0])} ~ {kst(metrics['period'][1])}")
-            st.dataframe([{'기준':label,'Brier (낮을수록 좋음)':metrics[key]['brier'],'Log loss (낮을수록 좋음)':metrics[key]['log_loss'],'최대 확률 적중률':metrics[key]['accuracy']} for key,label in [('model','입력 기대득점 모형'),('market','배당 마진 조정'),('uniform','승무패 각 1/3')]],hide_index=True)
-            st.caption('Brier: 세 결과 확률의 제곱오차 합 평균(0~2). Log loss: 실제 결과에 준 확률의 음의 자연로그 평균. 극단 확률은 계산용 1e-15로 제한합니다.')
-            st.dataframe(metrics['calibration'],hide_index=True)
-            st.caption('확률 보정 상태 (별도 보정 학습 미실시): 3개 결과를 20% 폭으로 묶어 평균 예측과 실제 발생 비율을 비교합니다. 건수는 경기 수가 아니라 경기×결과 수입니다. 표본이 적으면 해석을 보류하세요.')
-            st.write({'정산 확인 표본':metrics['settled_n'],'가정 순손익(원)':metrics['profit'],'ROI(순손익/투입액)':metrics['roi'],'최대 낙폭(원)':metrics['max_drawdown']})
-            st.caption('수익 비교는 매 경기 최대 확률 결과에 고정 1,000원 단일 선택을 한 가정이며 조합 전략 검증이 아닙니다. 당시 배당·규칙 확인된 종료 경기만 포함, 취소 경기는 평가·투입액에서 제외. 세금·한도·배당 변경 미반영. 최대 낙폭은 누적 순손익 최고점 대비 하락액입니다.')
-            st.line_chart(metrics['equity'])
-    if evaluation['excluded']:
-        st.dataframe(evaluation['excluded'],hide_index=True)
-    st.download_button('예측·결과 기록 내보내기 (시간은 ISO 시간대 포함)',json.dumps(relevant,ensure_ascii=False,indent=2),'history.json','application/json')
-    st.caption('기록은 이 컴퓨터의 data/history.sqlite3에 저장됩니다. CSV 경기 입력 자체는 저장하지 않습니다. 브라우저/다른 컴퓨터 사이 자동 동기화는 없습니다. DB를 직접 수정하면 기록 무결성이 보장되지 않습니다.')
-
-st.divider()
-st.caption(f'모형 {VERSION} · 정보가 없으면 빈칸 유지 · 데이터 충실도와 예측 확률 별도 표시 · 감당할 수 있는 고정 예산 안에서만 비교하세요.')
+        with st.form('result'):
+            pid=st.selectbox('예측 ID',[x['id'] for x in pending])
+            official=st.text_area('공식 결과 JSON',help='축구 {"regulation":[2,1]}, 농구 {"including_overtime":[90,88]}, 배구 {"sets":[[25,20],[25,21],[25,22]]}')
+            source=st.text_input('공식 종료 결과 출처');confirmed=st.checkbox('공식 종료와 상품 정산 범위를 확인했습니다')
+            if st.form_submit_button('결과 저장'):
+                try:record_result(DB,pid,json.loads(official),source,confirmed);st.success('결과 저장. 화면을 새로고침하면 지표에 반영됩니다.')
+                except (ValueError,KeyError,TypeError) as e:st.error(str(e))
+    metrics=evaluate(records)
+    if not metrics:st.info('평가 표본 없음 · 실제 과거 성능 검증 미완료')
+    for key,m in metrics.items():
+        with st.expander(key):
+            st.json(m)
+    st.caption('Brier·log loss는 낮을수록 좋습니다. 보정 표는 예측 확률과 실제 비율 비교입니다. ROI는 배당/정산 확인된 실제 기록에 경기당 고정 1,000원·최대 확률 선택 가정, 세금·취소·연기 상품 미지원. 기존 축구 v1 기록은 별도 DB에 보존되며 대회를 추측해 새 기록에 합치지 않습니다.')
+    st.download_button('기록 내보내기',json.dumps(records,ensure_ascii=False,indent=2),'multi_history.json')
