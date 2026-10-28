@@ -45,3 +45,38 @@ def test_demo_times_stable_and_bad_csv_does_not_restore_old_rows(tmp_path,monkey
     assert at.session_state['entered']==[]
     assert not at.exception
     assert not any(x.key=='detail' for x in at.selectbox)
+
+def test_auto_missing_key_has_no_fake_games(tmp_path,monkeypatch):
+    monkeypatch.setenv('BET_DATA_DIR',str(tmp_path))
+    monkeypatch.delenv('APISPORTS_KEY',raising=False)
+    at=AppTest.from_file(str(APP),default_timeout=60).run()
+    at.sidebar.radio[0].set_value('자동 경기 불러오기').run()
+    next(x for x in at.button if x.label=='공급원 대회·시즌 목록 조회').click().run()
+    assert not at.exception
+    assert any('조회 실패' in x.value for x in at.error)
+    assert not any(x.key=='detail' for x in at.selectbox)
+
+def test_auto_mocked_fixture_to_manual_flow(tmp_path,monkeypatch):
+    from datetime import datetime,timezone,timedelta
+    from toto.providers import FetchResult
+    import toto.auto_ui as ui
+    monkeypatch.setenv('BET_DATA_DIR',str(tmp_path))
+    now=datetime.now(timezone.utc).isoformat()
+    league={'id':'7','name':'합성 KBL 후보','country':'합성','type':'League','seasons':['2026'],'raw':{'id':7,'seasons':['2026']}}
+    event={'provider':'API-Sports/basketball','provider_match_id':'10','provider_home_id':'1','provider_away_id':'2','league_id':'7','season':'2026','home':'합성 홈','away':'합성 원정','kickoff':(datetime.now(timezone.utc)+timedelta(days=2)).isoformat(),'stage':'합성 단계','status':{'short':'NS'},'scores':None,'goals':None,'source':'https://v1.basketball.api-sports.io/games','collected_at':now,'provider_updated_at':None,'data_as_of':None,'raw':{'synthetic_fixture':True}}
+    monkeypatch.setattr(ui,'catalog',lambda sport:FetchResult('ok',[league]))
+    monkeypatch.setattr(ui,'games',lambda *args:FetchResult('ok',[event]))
+    at=AppTest.from_file(str(APP),default_timeout=60).run()
+    at.sidebar.radio[0].set_value('자동 경기 불러오기').run()
+    next(x for x in at.button if x.label=='공급원 대회·시즌 목록 조회').click().run()
+    next(x for x in at.checkbox if x.label.startswith('선택 대회')).check().run()
+    next(x for x in at.button if x.label=='경기 불러오기').click().run()
+    assert not at.exception
+    next(x for x in at.checkbox if x.label.startswith('원자료의 경기')).check().run()
+    next(x for x in at.button if x.label=='확인한 일정으로 수동 입력 채우기').click().run()
+    assert at.session_state['auto_prefill']['home']=='합성 홈'
+    at.sidebar.radio[0].set_value('실제/예시 자료 입력').run()
+    assert not at.exception
+    assert next(x for x in at.text_input if x.label=='홈 표시 이름').value=='합성 홈'
+    assert next(x for x in at.text_input if x.label=='구매 마감').value==''
+    assert next(x for x in at.text_input if x.label=='홈 승 배당').value==''

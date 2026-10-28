@@ -11,6 +11,7 @@ from toto.multisport import COMPETITIONS,MARKETS,VERSIONS,EXAMPLE_PARAMS,demos,v
 from toto.validation import kst,timestamp
 from toto.combinations import compare
 from toto.multi_history import load,save,record_result,evaluate,audited_records
+from toto.auto_ui import render as render_auto
 
 st.set_page_config(page_title='다섯 대회 분석 실험실',layout='wide')
 st.title('다섯 대회 분석·시뮬레이션 실험실')
@@ -22,10 +23,13 @@ comp=st.sidebar.selectbox('대회',list(COMPETITIONS))
 div=st.sidebar.selectbox('KOVO 부문',['남자부','여자부']) if comp=='KOVO' else '해당 없음'
 sport=COMPETITIONS[comp]
 param_labels={'pace':'경기 전체 팀당 예상 공격 횟수','pace_sd':'공통 공격 횟수의 표준편차','home_eff':'홈 공격 1회당 기대득점','away_eff':'원정 공격 1회당 기대득점','residual_sd':'팀 득점 잔차 표준편차','close_pace':'접전 시 후반 속도 배수','blowout_pace':'큰 점수 차 시 후반 속도 배수','overtime_fraction':'연장 1회 공격 횟수 / 정규경기 공격 횟수','rally_home':'한 랠리에서 홈이 이길 확률','fatigue_per_set':'세트마다 홈 랠리 확률 변화','substitution_delta':'교체 후 홈 랠리 확률 변화','substitution_after_point':'세트 내 합계 몇 점부터 교체 효과 적용','home_xg':'홈 경기 전체 기대득점','away_xg':'원정 경기 전체 기대득점','minute':'경과 시간(사전 기록은 0)','home_score':'현재 홈 점수(사전 기록은 0)','away_score':'현재 원정 점수(사전 기록은 0)'}
-mode=st.sidebar.radio('데이터',['예시 데이터','실제/예시 자료 입력'])
+mode=st.sidebar.radio('데이터',['예시 데이터','실제/예시 자료 입력','자동 경기 불러오기'])
+if mode=='자동 경기 불러오기':
+    render_auto(st,DB.parent/'auto_sources.sqlite3',comp,div)
+    st.stop()
 
 def encode_csv(rows):
-    buf=io.StringIO();w=csv.DictWriter(buf,fieldnames=list(demos()[0]));w.writeheader()
+    buf=io.StringIO();w=csv.DictWriter(buf,fieldnames=[*demos()[0], 'auto_provenance']);w.writeheader()
     for r in rows:w.writerow({k:json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list,bool)) else v for k,v in r.items() if k in w.fieldnames})
     return buf.getvalue().encode('utf-8-sig')
 
@@ -38,10 +42,15 @@ if mode!='예시 데이터':
     method=st.radio('입력 방법',['한 경기 직접 입력','CSV 업로드','CSV 붙여넣기'])
     if method=='한 경기 직접 입력':
         st.caption('팀 ID는 대회·시즌·남녀부 범위에서 같은 팀에 같은 값을 사용합니다. 공급원 이름이 달라도 동일 ID를 직접 지정하세요. 아래 숫자는 실제 자료에서 확인한 가정만 입력하세요.')
+        prefill=st.session_state.get('auto_prefill',{})
+        if prefill.get('competition')!=comp or prefill.get('division')!=div:prefill={}
+        if prefill:st.info('자동 일정으로 채운 초안입니다. 빈 항목은 미확보이며 분석 전에 확인해야 합니다. 해외 배당은 채우지 않습니다.')
+        form_key=hashlib.sha256(json.dumps([comp,div,prefill],sort_keys=True,ensure_ascii=False).encode()).hexdigest()[:16]
         with st.form('input'):
             r={'competition':comp,'division':div}
+            if prefill:r['auto_provenance']=prefill['auto_provenance']
             for k,label in [('season','시즌 (공식 자료 확인 후 기입)'),('stage','대회 단계'),('match_id','경기 ID'),('home_id','홈 팀 ID'),('away_id','원정 팀 ID'),('home','홈 표시 이름'),('away','원정 표시 이름'),('provider','공급원 이름'),('kickoff','시작 시각'),('deadline','구매 마감'),('source','자료 출처'),('collected_at','수집 시각'),('as_of','정보 기준 시각'),('rules_version','정산 규칙 버전/식별자'),('rules_source','공식 규칙·베트맨 상품 근거 URL/자료명'),('basis','모형 입력 근거·표본 수·누락 항목')]:
-                r[k]=st.text_input(label,help='시간은 2026-11-01T19:00:00+09:00 형식' if k in ['kickoff','deadline','collected_at','as_of'] else None)
+                r[k]=st.text_input(label,value=prefill.get(k,''),key='manual_'+form_key+k,help='시간은 2026-11-01T19:00:00+09:00 형식' if k in ['kickoff','deadline','collected_at','as_of'] else None)
             r['kind']=st.selectbox('실제/예시',['real','example'],format_func=lambda x:'실제 입력' if x=='real' else '예시 데이터')
             r['market']=st.selectbox('상품 계산 기준',MARKETS[sport]);r['line']=st.text_input('기준점 (승패는 빈칸, 홈 핸디캡은 부호 포함)')
             st.caption('선택한 상품의 배당만 채우세요. 승무패는 홈·무·원정, 승패는 홈·원정, 총득점은 오버·언더입니다.')
@@ -61,7 +70,7 @@ if mode!='예시 데이터':
                     else:
                         st.session_state.entered=[*st.session_state.get('entered',[]),r];rows=st.session_state.entered;st.success('입력 완료')
                 except (ValueError,TypeError):st.error('필수 배당·수치·근거 JSON을 확인하세요. 숫자에는 쉼표를 넣지 마세요.')
-        st.caption('이 버전에서 수치 입력이 어려우면 예시 데이터로 구조를 확인하세요. 입력을 추측해서 채우지 마세요. 자동 데이터 수집은 연결되지 않았습니다.')
+        st.caption('이 버전에서 수치 입력이 어려우면 예시 데이터로 구조를 확인하세요. 입력을 추측해서 채우지 마세요. 자동 조회한 일정은 왼쪽 ‘자동 경기 불러오기’에서 가져올 수 있습니다. 모형값·베트맨 자료는 직접 확인해야 합니다.')
     else:
         text=''
         if method=='CSV 업로드':
@@ -79,8 +88,8 @@ if mode!='예시 데이터':
                 parsed=[]
                 for r in reader:
                     if len(parsed)>=100 or None in r or any(v is None for v in r.values()):raise ValueError('행 수/열 수 오류')
-                    for k in ['params','odds','evidence','rules_verified','model_inputs_supported','combination_verified','odds_available_verified','source_conflict']:
-                        if k in r:r[k]=json.loads(r[k])
+                    for k in ['params','odds','evidence','rules_verified','model_inputs_supported','combination_verified','odds_available_verified','source_conflict','auto_provenance']:
+                        if k in r and r[k].strip():r[k]=json.loads(r[k])
                     parsed.append(r)
                 rows=parsed;st.session_state.entered=rows
             except (ValueError,TypeError) as e:st.error(f'CSV 오류: {e}. 이전 자료는 분석에서 제거했습니다.');rows=[];st.session_state.entered=[]
@@ -104,7 +113,7 @@ def choose(key):
 
 with tabs[0]:
     st.subheader(f'{comp} {div}')
-    st.info('일정·배당·선수 정보 자동 API: 전 대회 미연결. 입력 자료는 세션에 보관되며 자동 갱신하지 않습니다. 예시 시각은 합성 자료 생성 시각입니다.')
+    st.info('일정 API는 ‘자동 경기 불러오기’에서 별도 조회합니다. 실제 계정 연결·대회 지원 여부는 조회 상태를 확인하세요. 선수·베트맨 자동 연결 없음. 입력 자료는 세션에 보관되며 자동 갱신하지 않습니다. 예시 시각은 합성 자료 생성 시각입니다.')
     st.dataframe([{'대회':c,'부문':d,'예시 데이터': '가능','실제 자료 수동 입력':'가능','기본 모형':'조건부 구현 (학습 없음)','과거 성능 검증':'미완료','추천 기준':'미충족'} for c in COMPETITIONS for d in (['남자부','여자부'] if c=='KOVO' else ['해당 없음'])],hide_index=True)
     for i in visible:
         r=rows[i];st.write(f"{'예시 데이터' if r.get('kind')=='example' else '실제 입력'} · {r.get('season')} · {r.get('stage')} · {r.get('home')} – {r.get('away')}")
